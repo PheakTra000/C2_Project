@@ -99,71 +99,132 @@ def api(url, data=None):
         pass
     return None
 
-# ─── PTY shell ──────────────────────────────────────────────────────
-def shell_start():
-    global SH_FD, SH_PID
-    import pty
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.environ["TERM"] = "xterm-256color"
-        os.execvp("/bin/bash", ["/bin/bash", "-i"])
-    SH_FD = fd
-    SH_PID = pid
+# ─── shell (PTY on Linux, pipe on Windows) ─────────────────────────
+IS_WIN = platform.system() == "Windows"
 
-    def reader():
-        while True:
-            try:
-                r, _, _ = select.select([SH_FD], [], [], 0.5)
-                if r:
-                    data = os.read(SH_FD, 4096)
+if IS_WIN:
+    def shell_start():
+        global SH_FD, SH_PID
+        import subprocess as _sp
+        p = _sp.Popen(
+            ["cmd.exe"],
+            stdin=_sp.PIPE, stdout=_sp.PIPE, stderr=_sp.STDOUT,
+            shell=True, bufsize=0
+        )
+        SH_FD = p.stdin
+        SH_PID = p
+
+        def reader():
+            while True:
+                try:
+                    data = p.stdout.read(4096)
                     if not data:
                         break
                     with SH_LOCK:
                         SH_BUF.append(data)
-            except (ValueError, OSError):
-                break
+                except Exception:
+                    break
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+
+    def shell_write(text):
+        if SH_FD is not None:
+            try:
+                SH_FD.write(text.encode())
+                SH_FD.flush()
             except Exception:
-                break
+                pass
 
-    t = threading.Thread(target=reader, daemon=True)
-    t.start()
-
-def shell_write(text):
-    if SH_FD is not None:
-        os.write(SH_FD, text.encode())
-
-def shell_flush():
-    with SH_LOCK:
-        if not SH_BUF:
+    def shell_flush():
+        with SH_LOCK:
+            if not SH_BUF:
+                return ""
+            out = b"".join(SH_BUF)
+            SH_BUF.clear()
+        try:
+            return out.decode(errors="replace")
+        except Exception:
             return ""
-        out = b"".join(SH_BUF)
-        SH_BUF.clear()
-    try:
-        return out.decode(errors="replace")
-    except Exception:
-        return ""
 
-def shell_resize(cols=80, rows=24):
-    if SH_FD is not None:
-        import struct, fcntl, termios
-        s = struct.pack("HHHH", rows, cols, 0, 0)
-        fcntl.ioctl(SH_FD, termios.TIOCSWINSZ, s)
+    def shell_resize(cols=80, rows=24):
+        pass
 
-def shell_stop():
-    global SH_FD, SH_PID
-    if SH_PID:
+    def shell_stop():
+        global SH_FD, SH_PID
+        if SH_PID:
+            try:
+                SH_PID.kill()
+            except Exception:
+                pass
+        SH_FD = None
+        SH_PID = None
+
+else:
+    def shell_start():
+        global SH_FD, SH_PID
+        import pty
+        pid, fd = pty.fork()
+        if pid == 0:
+            os.environ["TERM"] = "xterm-256color"
+            os.execvp("/bin/bash", ["/bin/bash", "-i"])
+        SH_FD = fd
+        SH_PID = pid
+
+        def reader():
+            while True:
+                try:
+                    r, _, _ = select.select([SH_FD], [], [], 0.5)
+                    if r:
+                        data = os.read(SH_FD, 4096)
+                        if not data:
+                            break
+                        with SH_LOCK:
+                            SH_BUF.append(data)
+                except (ValueError, OSError):
+                    break
+                except Exception:
+                    break
+
+        t = threading.Thread(target=reader, daemon=True)
+        t.start()
+
+    def shell_write(text):
+        if SH_FD is not None:
+            os.write(SH_FD, text.encode())
+
+    def shell_flush():
+        with SH_LOCK:
+            if not SH_BUF:
+                return ""
+            out = b"".join(SH_BUF)
+            SH_BUF.clear()
         try:
-            os.kill(SH_PID, signal.SIGTERM)
-            os.waitpid(SH_PID, 0)
+            return out.decode(errors="replace")
         except Exception:
-            pass
-    if SH_FD is not None:
-        try:
-            os.close(SH_FD)
-        except Exception:
-            pass
-    SH_FD = None
-    SH_PID = None
+            return ""
+
+    def shell_resize(cols=80, rows=24):
+        if SH_FD is not None:
+            import struct, fcntl, termios
+            s = struct.pack("HHHH", rows, cols, 0, 0)
+            fcntl.ioctl(SH_FD, termios.TIOCSWINSZ, s)
+
+    def shell_stop():
+        global SH_FD, SH_PID
+        if SH_PID:
+            try:
+                os.kill(SH_PID, signal.SIGTERM)
+                os.waitpid(SH_PID, 0)
+            except Exception:
+                pass
+        if SH_FD is not None:
+            try:
+                os.close(SH_FD)
+            except Exception:
+                pass
+        SH_FD = None
+        SH_PID = None
 
 # ─── core ────────────────────────────────────────────────────────────
 def get_key():
