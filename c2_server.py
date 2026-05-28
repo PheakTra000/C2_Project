@@ -110,7 +110,7 @@ def agent_login():
 
 @app.route('/api/agents', methods=['GET'])
 def list_agents():
-    tok = request.args.get("token", "")
+    tok = request.args.get("token", request.cookies.get("token", ""))
     if tok != DASH_TOKEN:
         return jsonify({"error": "unauthorized"}), 403
     now = datetime.now(timezone.utc)
@@ -175,7 +175,7 @@ def issue_task():
 
 @app.route('/api/honeypot')
 def get_honeypot():
-    tok = request.args.get("token", "")
+    tok = request.args.get("token", request.cookies.get("token", ""))
     if tok != DASH_TOKEN:
         return jsonify({"error": "unauthorized"}), 403
     with LOCK:
@@ -183,7 +183,7 @@ def get_honeypot():
 
 @app.route('/api/results/<aid>', methods=['GET'])
 def get_results(aid):
-    tok = request.args.get("token", "")
+    tok = request.args.get("token", request.cookies.get("token", ""))
     if tok != DASH_TOKEN:
         return jsonify({"error": "unauthorized"}), 403
     with LOCK:
