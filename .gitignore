@@ -1,0 +1,11 @@
+cert.pem
+key.pem
+*.pyc
+__pycache__/
+build/
+dist/
+*.spec
+*.tar
+*.exe
+/logs/
+honeypot.json

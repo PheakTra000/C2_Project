@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-C2 Operator CLI - control agents
-"""
 import sys
 import json
 import urllib.request
@@ -10,11 +7,15 @@ import ssl
 
 SERVER = "http://127.0.0.1:8443"
 
+def _get_ctx():
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
 def _try_open(req):
     try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
+        ctx = _get_ctx()
         return urllib.request.urlopen(req, context=ctx, timeout=10)
     except urllib.error.URLError:
         try:
@@ -35,6 +36,7 @@ def http_post(url, data):
     body = json.dumps(data).encode()
     req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"})
     try:
+        ctx = _get_ctx()
         resp = urllib.request.urlopen(req, context=ctx, timeout=10)
         return json.loads(resp.read().decode())
     except Exception as e:
@@ -99,7 +101,16 @@ commands:
 """)
 
 def main():
-    sys.stdout.reconfigure(line_buffering=True)  # noqa
+    global SERVER
+    i = 1
+    while i < len(sys.argv):
+        a = sys.argv[i]
+        if a == "--server" and i + 1 < len(sys.argv):
+            SERVER = sys.argv[i + 1]; i += 2
+        else:
+            i += 1
+
+    sys.stdout.reconfigure(line_buffering=True)
     print("[C2 operator console]")
     print("type 'help' for commands")
     while True:
