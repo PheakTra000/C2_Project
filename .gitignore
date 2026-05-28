@@ -9,3 +9,5 @@ dist/
 *.exe
 /logs/
 honeypot.json
+build.py
+.env
