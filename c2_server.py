@@ -22,10 +22,35 @@ LOCK = threading.Lock()
 
 RAW_KEY = None
 KEY_B64 = None
-DASH_TOKEN = base64.urlsafe_b64encode(os.urandom(16)).decode().rstrip("=")
+
+CONFIG_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
+CONFIG_FILE = os.path.join(CONFIG_DIR, ".c2_config.json")
+
+def _load_config():
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE) as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def _save_config(cfg):
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f)
+    except Exception:
+        pass
+
+cfg = _load_config()
+if cfg.get("dash_token"):
+    DASH_TOKEN = cfg["dash_token"]
+else:
+    DASH_TOKEN = base64.urlsafe_b64encode(os.urandom(16)).decode().rstrip("=")
+    _save_config({"dash_token": DASH_TOKEN})
 
 HONEYPOT_LOG = []
-HONEYPOT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "honeypot.json")
+HONEYPOT_FILE = os.path.join(CONFIG_DIR, "honeypot.json")
 
 RATE_LIMIT_HITS = {}
 RATE_LIMIT_LOCK = threading.Lock()

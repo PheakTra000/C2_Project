@@ -11,3 +11,4 @@ dist/
 honeypot.json
 build.py
 .env
+.c2_config.json
