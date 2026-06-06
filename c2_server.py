@@ -81,7 +81,7 @@ def _check_rate(limit):
 
 @app.before_request
 def rate_limit():
-    limits = {"login": 10, "agents": 30, "tasks": 60, "task": 60, "results": 120, "honeypot": 20, "other": 60}
+    limits = {"login": 30, "agents": 30, "tasks": 60, "task": 60, "results": 120, "honeypot": 20, "other": 60}
     lim = limits.get(_endpoint_from_path(request.path), 60)
     if _check_rate(lim):
         return jsonify({"error": "rate limited"}), 429

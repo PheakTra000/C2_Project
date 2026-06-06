@@ -606,8 +606,9 @@ def main():
         INTERVAL = register()
         if AID:
             break
-        print(f"[agent] register fail (attempt {attempt+1}), retry in 10s")
-        time.sleep(10)
+        delay = min(30, 5 * (1 + attempt // 3))
+        print(f"[agent] register fail (attempt {attempt+1}), retry in {delay}s")
+        time.sleep(delay)
     else:
         return
     print(f"[agent] id={AID} interval={INTERVAL}s")
