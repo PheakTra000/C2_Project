@@ -56,20 +56,23 @@ RATE_HITS = {}
 RATE_LOCK = threading.Lock()
 RATE_WINDOW = 60
 
+def _endpoint_from_path(path):
+    return path.split("/")[2] if path.startswith("/api/") else "other"
+
 def _rate_key():
     ip = request.remote_addr or "unknown"
-    ep = request.path.split("/")[2] if request.path.startswith("/api/") else "other"
+    ep = _endpoint_from_path(request.path)
     return f"{ip}:{ep}"
 
 def _check_rate(limit):
     now = time.time()
     cutoff = now - RATE_WINDOW
     with RATE_LOCK:
-        for k in list(RATE_HITS.keys()):
-            RATE_HITS[k] = [t for t in RATE_HITS[k] if t > cutoff]
-            if not RATE_HITS[k]:
-                del RATE_HITS[k]
         key = _rate_key()
+        if key in RATE_HITS:
+            RATE_HITS[key] = [t for t in RATE_HITS[key] if t > cutoff]
+            if not RATE_HITS[key]:
+                del RATE_HITS[key]
         hits = RATE_HITS.setdefault(key, [])
         if len(hits) >= limit:
             return True
@@ -78,9 +81,8 @@ def _check_rate(limit):
 
 @app.before_request
 def rate_limit():
-    limits = {"login": 10, "agents": 30, "tasks": 60, "results": 120, "honeypot": 20, "other": 60}
-    ep = request.path.split("/")[2] if request.path.startswith("/api/") else "other"
-    lim = limits.get(ep, 60)
+    limits = {"login": 10, "agents": 30, "tasks": 60, "task": 60, "results": 120, "honeypot": 20, "other": 60}
+    lim = limits.get(_endpoint_from_path(request.path), 60)
     if _check_rate(lim):
         return jsonify({"error": "rate limited"}), 429
 
